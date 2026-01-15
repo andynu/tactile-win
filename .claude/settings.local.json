@@ -12,7 +12,8 @@
       "Bash(cargo build:*)",
       "Bash(timeout 5 cargo run:*)",
       "Bash(bd ready:*)",
-      "Bash(bd show:*)"
+      "Bash(bd show:*)",
+      "Bash(bd close tw-xq0.8 -r \"Multi-monitor support with Tab key cycling, monitor enumeration, and overlay repositioning\")"
     ]
   }
 }
