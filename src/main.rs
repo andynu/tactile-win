@@ -1,13 +1,17 @@
+mod config;
 mod grid;
 mod keyboard;
 mod overlay;
 mod selection;
+mod settings;
+mod tray;
 mod window;
 
 use std::cell::RefCell;
 use std::ptr;
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::HMONITOR;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_SHIFT, VK_G,
@@ -17,11 +21,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_HOTKEY, WNDCLASSW,
 };
 
+use crate::config::Config;
 use crate::grid::Grid;
 use crate::keyboard::{install_keyboard_hook, set_hook_active, uninstall_keyboard_hook, KeyInput};
 use crate::overlay::Overlay;
 use crate::selection::{SelectionState, TileSelector};
-use crate::window::{get_foreground_window, get_work_area, move_window};
+use crate::settings::show_settings;
+use crate::tray::{set_settings_callback, TrayIcon};
+use crate::window::{
+    get_all_monitors, get_foreground_window, get_monitor_work_area, get_window_monitor,
+    get_work_area, move_window,
+};
 
 const CLASS_NAME: PCWSTR = w!("TactileWinClass");
 const HOTKEY_ID: i32 = 1;
@@ -31,9 +41,13 @@ thread_local! {
 }
 
 struct AppState {
+    config: Config,
     overlay: Option<Overlay>,
     selector: Option<TileSelector>,
     target_hwnd: Option<HWND>,
+    monitors: Vec<HMONITOR>,
+    current_monitor_idx: usize,
+    current_work_area: Option<RECT>,
 }
 
 fn handle_hotkey() {
@@ -44,22 +58,78 @@ fn handle_hotkey() {
             app.target_hwnd = get_foreground_window();
 
             if let Some(target) = app.target_hwnd {
+                // Get all monitors and find which one the window is on
+                app.monitors = get_all_monitors();
+                let window_monitor = get_window_monitor(target);
+
+                // Find the index of the current monitor
+                app.current_monitor_idx = app
+                    .monitors
+                    .iter()
+                    .position(|&m| m == window_monitor)
+                    .unwrap_or(0);
+
                 if let Some(work_area) = get_work_area(target) {
-                    // Create overlay if needed
-                    if app.overlay.is_none() {
-                        app.overlay = Overlay::new(work_area).ok();
-                    }
-
-                    // Create selector
-                    let grid = Grid::new(4, 2, 10, work_area);
-                    app.selector = Some(TileSelector::new(grid));
-
-                    // Show overlay and activate keyboard hook
-                    if let Some(ref overlay) = app.overlay {
-                        overlay.show();
-                        set_hook_active(true);
-                    }
+                    app.current_work_area = Some(work_area);
+                    show_overlay_on_work_area(app, work_area);
                 }
+            }
+        }
+    });
+}
+
+fn show_overlay_on_work_area(app: &mut AppState, work_area: RECT) {
+    // Create grid from config
+    let grid = Grid::new(
+        app.config.grid.cols,
+        app.config.grid.rows,
+        app.config.grid.gap,
+        work_area,
+    );
+
+    // Create overlay if needed, or update existing
+    if app.overlay.is_none() {
+        app.overlay = Overlay::new(work_area, &app.config).ok();
+    }
+    if let Some(ref overlay) = app.overlay {
+        overlay.update_position(work_area);
+        overlay.set_grid(grid.clone());
+    }
+
+    // Create selector
+    app.selector = Some(TileSelector::new(grid));
+
+    // Show overlay and activate keyboard hook
+    if let Some(ref overlay) = app.overlay {
+        overlay.show();
+        set_hook_active(true);
+    }
+}
+
+fn switch_to_next_monitor() {
+    APP_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(ref mut app) = *state {
+            if app.monitors.len() <= 1 {
+                return; // Only one monitor, nothing to switch
+            }
+
+            // Cycle to next monitor
+            app.current_monitor_idx = (app.current_monitor_idx + 1) % app.monitors.len();
+            let monitor = app.monitors[app.current_monitor_idx];
+
+            if let Some(work_area) = get_monitor_work_area(monitor) {
+                app.current_work_area = Some(work_area);
+
+                // Reset selection state
+                if let Some(ref mut selector) = app.selector {
+                    selector.reset();
+                }
+                if let Some(ref overlay) = app.overlay {
+                    overlay.set_highlight(None);
+                }
+
+                show_overlay_on_work_area(app, work_area);
             }
         }
     });
@@ -107,12 +177,20 @@ fn handle_key_input(input: KeyInput) {
                         }
                     }
                 }
+                KeyInput::Tab => {
+                    // Switch to next monitor
+                }
                 KeyInput::Other => {
                     // Ignore other keys
                 }
             }
         }
     });
+
+    // Handle Tab outside of borrow to avoid borrow conflict
+    if matches!(input, KeyInput::Tab) {
+        switch_to_next_monitor();
+    }
 }
 
 unsafe extern "system" fn window_proc(
@@ -152,6 +230,28 @@ fn unregister_hotkey(hwnd: HWND) {
     unsafe {
         let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
     }
+}
+
+fn open_settings() {
+    APP_STATE.with(|state| {
+        let state = state.borrow();
+        if let Some(ref app) = *state {
+            show_settings(app.config.clone(), on_settings_saved);
+        }
+    });
+}
+
+fn on_settings_saved(new_config: Config) {
+    APP_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if let Some(ref mut app) = *state {
+            app.config = new_config;
+            println!(
+                "Settings updated: {}x{} (gap: {})",
+                app.config.grid.cols, app.config.grid.rows, app.config.grid.gap
+            );
+        }
+    });
 }
 
 fn create_message_window() -> windows::core::Result<HWND> {
@@ -208,14 +308,42 @@ fn main() {
 
     match create_message_window() {
         Ok(hwnd) => {
+            // Load config
+            let mut config = Config::load();
+            config.validate();
+            if let Some(path) = Config::config_path() {
+                println!("Config file: {}", path.display());
+            }
+            println!(
+                "Grid: {}x{} (gap: {})",
+                config.grid.cols, config.grid.rows, config.grid.gap
+            );
+
             // Initialize app state
             APP_STATE.with(|state| {
                 *state.borrow_mut() = Some(AppState {
+                    config,
                     overlay: None,
                     selector: None,
                     target_hwnd: None,
+                    monitors: Vec::new(),
+                    current_monitor_idx: 0,
+                    current_work_area: None,
                 });
             });
+
+            // Create tray icon
+            let _tray = match TrayIcon::new() {
+                Ok(tray) => {
+                    println!("Tray icon created - right-click to access menu");
+                    set_settings_callback(open_settings);
+                    Some(tray)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to create tray icon: {}", e);
+                    None
+                }
+            };
 
             // Install keyboard hook with direct callback
             if let Err(e) = install_keyboard_hook(handle_key_input) {

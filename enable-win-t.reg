@@ -1,0 +1,7 @@
+Windows Registry Editor Version 5.00
+
+; Re-enable Win+T system shortcut (restore default Windows behavior)
+; After applying, log off and back on (or restart Explorer) for changes to take effect
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]
+"DisabledHotkeys"=-

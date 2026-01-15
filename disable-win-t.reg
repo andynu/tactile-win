@@ -1,0 +1,8 @@
+Windows Registry Editor Version 5.00
+
+; Disable Win+T system shortcut so Tactile-Win can use it
+; After applying, log off and back on (or restart Explorer) for changes to take effect
+; To re-enable, delete the DisabledHotkeys value or remove 'T' from its value
+
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced]
+"DisabledHotkeys"="T"

@@ -9,19 +9,26 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, RegisterClassW, SetLayeredWindowAttributes, ShowWindow,
-    CS_HREDRAW, CS_VREDRAW, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA, SW_HIDE, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos,
+    ShowWindow, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LAYERED_WINDOW_ATTRIBUTES_FLAGS, LWA_ALPHA,
+    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_PAINT, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::config::{AppearanceConfig, Config};
 use crate::grid::{Grid, TilePos};
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("TactileWinOverlay");
-const OVERLAY_ALPHA: u8 = 220;
 
 static OVERLAY_GRID: Mutex<Option<Grid>> = Mutex::new(None);
 static HIGHLIGHT_TILE: Mutex<Option<TilePos>> = Mutex::new(None);
+static APPEARANCE: Mutex<AppearanceConfig> = Mutex::new(AppearanceConfig {
+    tile_color: 0x00805030,
+    highlight_color: 0x0000A0FF,
+    background_color: 0x00302020,
+    text_color: 0x00FFFFFF,
+    alpha: 220,
+});
 
 pub struct Overlay {
     hwnd: HWND,
@@ -32,8 +39,11 @@ fn draw_grid(hwnd: HWND) {
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
 
+        // Get appearance config
+        let appearance = APPEARANCE.lock().ok().map(|a| a.clone()).unwrap_or_default();
+
         // Dark background
-        let bg_brush = CreateSolidBrush(COLORREF(0x00302020)); // Dark gray-brown
+        let bg_brush = CreateSolidBrush(COLORREF(appearance.background_color));
         FillRect(hdc, &ps.rcPaint, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
@@ -61,21 +71,16 @@ fn draw_grid(hwnd: HWND) {
             );
             let old_font = SelectObject(hdc, font.into());
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, COLORREF(0x00FFFFFF)); // White text
+            SetTextColor(hdc, COLORREF(appearance.text_color));
 
-            // Tile colors
-            let tile_brush = CreateSolidBrush(COLORREF(0x00805030)); // Teal-ish
-            let highlight_brush = CreateSolidBrush(COLORREF(0x0000A0FF)); // Orange highlight
-
-            let keys = [
-                ['Q', 'W', 'E', 'R'],
-                ['A', 'S', 'D', 'F'],
-            ];
+            // Tile colors from config
+            let tile_brush = CreateSolidBrush(COLORREF(appearance.tile_color));
+            let highlight_brush = CreateSolidBrush(COLORREF(appearance.highlight_color));
 
             let highlight = highlight_guard.as_ref().and_then(|h| h.as_ref());
 
-            for row in 0..grid.rows.min(2) {
-                for col in 0..grid.cols.min(4) {
+            for row in 0..grid.rows {
+                for col in 0..grid.cols {
                     let pos = TilePos { col, row };
                     let rect = grid.tile_rect(pos);
 
@@ -96,14 +101,15 @@ fn draw_grid(hwnd: HWND) {
 
                     FillRect(hdc, &draw_rect, HBRUSH(brush.0));
 
-                    // Draw key label centered
-                    let key = keys[row as usize][col as usize];
-                    let key_str: Vec<u16> = format!("{}", key).encode_utf16().collect();
+                    // Draw key label centered using tile_to_key
+                    if let Some(key) = grid.tile_to_key(pos) {
+                        let key_str: Vec<u16> = format!("{}", key).encode_utf16().collect();
 
-                    let center_x = (draw_rect.left + draw_rect.right) / 2 - 15;
-                    let center_y = (draw_rect.top + draw_rect.bottom) / 2 - 24;
+                        let center_x = (draw_rect.left + draw_rect.right) / 2 - 15;
+                        let center_y = (draw_rect.top + draw_rect.bottom) / 2 - 24;
 
-                    TextOutW(hdc, center_x, center_y, &key_str);
+                        let _ = TextOutW(hdc, center_x, center_y, &key_str);
+                    }
                 }
             }
 
@@ -135,7 +141,7 @@ unsafe extern "system" fn overlay_window_proc(
 }
 
 impl Overlay {
-    pub fn new(work_area: RECT) -> windows::core::Result<Self> {
+    pub fn new(work_area: RECT, config: &Config) -> windows::core::Result<Self> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
 
@@ -170,15 +176,25 @@ impl Overlay {
                 Some(ptr::null()),
             )?;
 
+            // Store appearance config
+            if let Ok(mut guard) = APPEARANCE.lock() {
+                *guard = config.appearance.clone();
+            }
+
             SetLayeredWindowAttributes(
                 hwnd,
                 COLORREF(0),
-                OVERLAY_ALPHA,
+                config.appearance.alpha,
                 LAYERED_WINDOW_ATTRIBUTES_FLAGS(LWA_ALPHA.0),
             )?;
 
             // Create and store grid
-            let grid = Grid::new(4, 2, 10, work_area);
+            let grid = Grid::new(
+                config.grid.cols,
+                config.grid.rows,
+                config.grid.gap,
+                work_area,
+            );
             if let Ok(mut guard) = OVERLAY_GRID.lock() {
                 *guard = Some(grid);
             }
@@ -216,5 +232,32 @@ impl Overlay {
 
     pub fn grid(&self) -> Option<Grid> {
         OVERLAY_GRID.lock().ok().and_then(|g| g.clone())
+    }
+
+    pub fn set_grid(&self, grid: Grid) {
+        if let Ok(mut guard) = OVERLAY_GRID.lock() {
+            *guard = Some(grid);
+        }
+        unsafe {
+            let _ = InvalidateRect(Some(self.hwnd), None, true);
+            let _ = UpdateWindow(self.hwnd);
+        }
+    }
+
+    pub fn update_position(&self, work_area: RECT) {
+        unsafe {
+            let width = work_area.right - work_area.left;
+            let height = work_area.bottom - work_area.top;
+
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                work_area.left,
+                work_area.top,
+                width,
+                height,
+                SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0),
+            );
+        }
     }
 }

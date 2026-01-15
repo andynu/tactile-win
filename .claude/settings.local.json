@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm:*)",
+      "Bash(bun --version:*)",
+      "Bash(rustc:*)",
+      "Bash(cmd.exe /c \"bun --version\")",
+      "Bash(powershell.exe -Command \"rustc --version; cargo --version; npm --version; bun --version\")",
+      "Bash(powershell.exe -Command \"npm --version; bun --version\")",
+      "Bash(powershell.exe:*)",
+      "Bash(bd create:*)",
+      "Bash(cargo build:*)",
+      "Bash(timeout 5 cargo run:*)",
+      "Bash(bd ready:*)",
+      "Bash(bd show:*)"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+// Application icon - ID 1 is used for the main application icon
+1 ICON "icon.ico"
+
+// Enable modern visual styles
+1 24 "app.manifest"
